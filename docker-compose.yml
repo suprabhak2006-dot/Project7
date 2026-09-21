@@ -1,0 +1,100 @@
+version: "3.8"
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: deeptrace-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgrespassword
+      POSTGRES_DB: deeptrace
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: deeptrace-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: deeptrace-backend
+    restart: unless-stopped
+    environment:
+      ENVIRONMENT: production
+      DATABASE_URL: postgresql+asyncpg://postgres:postgrespassword@postgres:5432/deeptrace
+      REDIS_URL: redis://redis:6379/0
+      SECRET_KEY: deeptrace-production-super-secret-key-change-in-prod
+      STORAGE_PATH: /app/storage
+      REPORT_PATH: /app/reports
+    ports:
+      - "8000:8000"
+    volumes:
+      - storage_data:/app/storage
+      - reports_data:/app/reports
+      - models_data:/app/models
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: deeptrace-worker
+    restart: unless-stopped
+    command: celery -A backend.app.workers.celery_app worker --loglevel=info --concurrency=2
+    environment:
+      ENVIRONMENT: production
+      DATABASE_URL: postgresql+asyncpg://postgres:postgrespassword@postgres:5432/deeptrace
+      REDIS_URL: redis://redis:6379/0
+      STORAGE_PATH: /app/storage
+      REPORT_PATH: /app/reports
+    volumes:
+      - storage_data:/app/storage
+      - reports_data:/app/reports
+      - models_data:/app/models
+    depends_on:
+      backend:
+        condition: service_started
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: deeptrace-frontend
+    restart: unless-stopped
+    environment:
+      NEXT_PUBLIC_API_URL: http://backend:8000/api
+    ports:
+      - "3000:3000"
+    depends_on:
+      - backend
+
+volumes:
+  postgres_data:
+  redis_data:
+  storage_data:
+  reports_data:
+  models_data:
