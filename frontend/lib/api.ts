@@ -151,6 +151,10 @@ class ApiClient {
     return this.request<Evidence>(`/evidence/${id}`);
   }
 
+  async listEvidence(caseId: number): Promise<Evidence[]> {
+    return this.request<Evidence[]>(`/cases/${caseId}/evidence`);
+  }
+
   async verifyEvidenceIntegrity(id: number): Promise<{
     evidence_id: number;
     evidence_number: string;
@@ -228,6 +232,126 @@ class ApiClient {
   // Audit Logs
   async getAuditLogs(caseId: number): Promise<AuditLog[]> {
     return this.request<AuditLog[]>(`/audit/${caseId}`);
+  }
+
+  // Workspace & Graph
+  async getCaseWorkspace(caseId: number): Promise<any> {
+    return this.request(`/cases/${caseId}/workspace`);
+  }
+
+  async getCaseGraph(caseId: number): Promise<any> {
+    return this.request(`/cases/${caseId}/graph`);
+  }
+
+  async listSubjects(caseId: number): Promise<any[]> {
+    return this.request(`/cases/${caseId}/subjects`);
+  }
+
+  async createSubject(caseId: number, data: { label: string; notes?: string }): Promise<any> {
+    return this.request(`/cases/${caseId}/subjects`, {
+      method: "POST",
+      body: JSON.stringify(data)
+    });
+  }
+
+  async listAnnotations(caseId: number): Promise<any[]> {
+    return this.request(`/cases/${caseId}/annotations`);
+  }
+
+  async createAnnotation(caseId: number, data: any): Promise<any> {
+    return this.request(`/cases/${caseId}/annotations`, {
+      method: "POST",
+      body: JSON.stringify(data)
+    });
+  }
+
+  async deleteAnnotation(annotationId: number): Promise<any> {
+    return this.request(`/annotations/${annotationId}`, {
+      method: "DELETE"
+    });
+  }
+
+  // Evidence Provenance & Labs
+  async getEvidenceProvenance(evidenceId: number): Promise<any> {
+    return this.request(`/evidence/${evidenceId}/provenance`);
+  }
+
+  async inspectPixel(evidenceId: number, x: number, y: number, windowSize: number = 16): Promise<any> {
+    return this.request(`/evidence/${evidenceId}/pixel-inspect`, {
+      method: "POST",
+      body: JSON.stringify({ x, y, window_size: windowSize })
+    });
+  }
+
+  getFilteredImageUrl(evidenceId: number, filterName: string): string {
+    return `${API_BASE}/evidence/${evidenceId}/filter/${filterName}`;
+  }
+
+  async getHistograms(evidenceId: number, faceBox?: number[]): Promise<any> {
+    let url = `/evidence/${evidenceId}/histograms`;
+    if (faceBox && faceBox.length === 4) {
+      url += `?fx=${faceBox[0]}&fy=${faceBox[1]}&fw=${faceBox[2]}&fh=${faceBox[3]}`;
+    }
+    return this.request(url);
+  }
+
+  async getCompressionForensics(evidenceId: number): Promise<any> {
+    return this.request(`/evidence/${evidenceId}/compression`);
+  }
+
+  async getColorLighting(evidenceId: number, faceBox?: number[]): Promise<any> {
+    let url = `/evidence/${evidenceId}/color-lighting`;
+    if (faceBox && faceBox.length === 4) {
+      url += `?fx=${faceBox[0]}&fy=${faceBox[1]}&fw=${faceBox[2]}&fh=${faceBox[3]}`;
+    }
+    return this.request(url);
+  }
+
+  async getVideoLab(evidenceId: number): Promise<any> {
+    return this.request(`/evidence/${evidenceId}/video-lab`);
+  }
+
+  async getAudioLab(evidenceId: number): Promise<any> {
+    return this.request(`/evidence/${evidenceId}/audio-lab`);
+  }
+
+  async compareEvidence(evidenceId1: number, evidenceId2: number): Promise<any> {
+    return this.request(`/evidence/compare`, {
+      method: "POST",
+      body: JSON.stringify({
+        evidence_id_1: evidenceId1,
+        evidence_id_2: evidenceId2
+      })
+    });
+  }
+
+  // Finding Review
+  async reviewFinding(findingId: number, status: string, notes?: string): Promise<any> {
+    return this.request(`/findings/${findingId}/review`, {
+      method: "PATCH",
+      body: JSON.stringify({
+        review_status: status,
+        reviewer_notes: notes
+      })
+    });
+  }
+
+  // Manifests & Packages
+  getCaseManifestUrl(caseId: number, format: "json" | "csv" = "json"): string {
+    return `${API_BASE}/cases/${caseId}/manifest?format=${format}`;
+  }
+
+  getCasePackageUrl(caseId: number): string {
+    return `${API_BASE}/cases/${caseId}/package`;
+  }
+
+  // System & Global Search
+  async getSystemHealth(): Promise<any> {
+    return this.request("/system/health");
+  }
+
+  async globalSearch(query: string): Promise<any> {
+    return this.request(`/search?q=${encodeURIComponent(query)}`);
   }
 }
 

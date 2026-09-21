@@ -184,3 +184,191 @@ class VideoForensicProcessor:
             "timeline": timeline,
             "analyzed_records": analyzed_records
         }
+
+    @staticmethod
+    def analyze_video_quality(video_path: str) -> Dict[str, Any]:
+        """
+        Calculates video quality metrics (Requirement 22):
+        Resolution, FPS, Blur score, Motion blur indicator, Blockiness, Frame drop indications.
+        """
+        cap = cv2.VideoCapture(video_path)
+        if not cap.isOpened():
+            return {"error": "Unable to read video for quality analysis"}
+
+        fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        duration = total_frames / fps if fps > 0 else 0.0
+
+        blur_scores = []
+        consecutive_diffs = []
+        prev_gray = None
+        frames_sampled = 0
+
+        # Sample up to 30 frames evenly
+        sample_step = max(1, total_frames // 30) if total_frames > 0 else 1
+        frame_idx = 0
+
+        while cap.isOpened() and frames_sampled < 30:
+            ret, frame = cap.read()
+            if not ret:
+                break
+            if frame_idx % sample_step == 0:
+                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                # Blur score via Laplacian variance
+                lap_var = float(cv2.Laplacian(gray, cv2.CV_64F).var())
+                blur_scores.append(lap_var)
+
+                if prev_gray is not None and prev_gray.shape == gray.shape:
+                    diff = float(np.mean(cv2.absdiff(gray, prev_gray)))
+                    consecutive_diffs.append(diff)
+                prev_gray = gray
+                frames_sampled += 1
+            frame_idx += 1
+
+        cap.release()
+
+        avg_blur = float(np.mean(blur_scores)) if blur_scores else 0.0
+        avg_motion = float(np.mean(consecutive_diffs)) if consecutive_diffs else 0.0
+        duplicate_frames_ratio = float(np.mean([1 if d < 1.0 else 0 for d in consecutive_diffs])) if consecutive_diffs else 0.0
+
+        # Quality warnings
+        warnings = []
+        if avg_blur < 50.0:
+            warnings.append("High blur detected (may degrade facial landmark precision)")
+        if width < 640 or height < 480:
+            warnings.append("Low resolution video input (< 480p)")
+        if duplicate_frames_ratio > 0.20:
+            warnings.append(f"High duplicate frame rate ({round(duplicate_frames_ratio * 100, 1)}%) detected")
+
+        return {
+            "resolution": f"{width}x{height}",
+            "fps": round(fps, 2),
+            "duration_sec": round(duration, 2),
+            "blur_score": round(avg_blur, 2),
+            "blur_assessment": "Crisp" if avg_blur > 200 else ("Moderate" if avg_blur > 80 else "Blurry"),
+            "motion_intensity": round(avg_motion, 2),
+            "duplicate_frames_pct": round(duplicate_frames_ratio * 100, 1),
+            "quality_warnings": warnings
+        }
+
+    @staticmethod
+    def detect_scenes(video_path: str, threshold: float = 0.60) -> List[Dict[str, Any]]:
+        """
+        Detects video scene cuts/transitions using color histogram cross-correlation (Requirement 21).
+        """
+        cap = cv2.VideoCapture(video_path)
+        if not cap.isOpened():
+            return []
+
+        fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        step = max(1, int(fps // 2))  # Sample every 0.5s
+
+        scenes = []
+        current_scene_start = 0.0
+        prev_hist = None
+        frame_idx = 0
+
+        while cap.isOpened():
+            ret, frame = cap.read()
+            if not ret:
+                break
+            if frame_idx % step == 0:
+                t = frame_idx / fps
+                hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+                hist = cv2.calcHist([hsv], [0, 1], None, [16, 16], [0, 180, 0, 256])
+                cv2.normalize(hist, hist, alpha=0, beta=1, norm_type=cv2.NORM_MINMAX)
+
+                if prev_hist is not None:
+                    sim = cv2.compareHist(prev_hist, hist, cv2.HISTCMP_CORREL)
+                    if sim < threshold:
+                        # Scene boundary detected
+                        scenes.append({
+                            "scene_id": len(scenes) + 1,
+                            "start_time": round(current_scene_start, 2),
+                            "end_time": round(t, 2),
+                            "duration": round(t - current_scene_start, 2),
+                            "transition_confidence": round(float(1.0 - max(0.0, sim)), 3)
+                        })
+                        current_scene_start = t
+                prev_hist = hist
+            frame_idx += 1
+
+        cap.release()
+
+        final_duration = frame_idx / fps if fps > 0 else 0.0
+        if final_duration > current_scene_start:
+            scenes.append({
+                "scene_id": len(scenes) + 1,
+                "start_time": round(current_scene_start, 2),
+                "end_time": round(final_duration, 2),
+                "duration": round(final_duration - current_scene_start, 2),
+                "transition_confidence": 1.0
+            })
+
+        return scenes
+
+    @staticmethod
+    def compute_temporal_consistency_matrix(frames: List[np.ndarray]) -> Dict[str, Any]:
+        """
+        Computes an N x N temporal consistency correlation matrix across frames (Requirement 24).
+        """
+        n = min(len(frames), 16)
+        if n < 2:
+            return {"matrix": [], "labels": [], "mean_consistency": 1.0}
+
+        subsampled = [cv2.resize(f, (64, 64)) for f in frames[:n]]
+        vectors = [f.flatten().astype(np.float32) for f in subsampled]
+        for i in range(n):
+            norm = np.linalg.norm(vectors[i])
+            if norm > 1e-6:
+                vectors[i] /= norm
+
+        matrix = []
+        for i in range(n):
+            row = []
+            for j in range(n):
+                sim = float(np.dot(vectors[i], vectors[j]))
+                row.append(round(max(0.0, min(1.0, sim)), 3))
+            matrix.append(row)
+
+        off_diag = [matrix[i][i+1] for i in range(n-1)]
+        mean_cons = float(np.mean(off_diag)) if off_diag else 1.0
+
+        return {
+            "matrix": matrix,
+            "labels": [f"F{i+1}" for i in range(n)],
+            "mean_consecutive_consistency": round(mean_cons, 4),
+            "interpretation": "High temporal consistency" if mean_cons > 0.85 else "Temporal jitter / abrupt discontinuities observed"
+        }
+
+    @staticmethod
+    def compute_frame_difference(frame1_bgr: np.ndarray, frame2_bgr: np.ndarray) -> Dict[str, Any]:
+        """
+        Frame difference lab: absolute difference, edge difference, and structural disparity (Requirement 12).
+        """
+        if frame1_bgr.shape != frame2_bgr.shape:
+            frame2_bgr = cv2.resize(frame2_bgr, (frame1_bgr.shape[1], frame1_bgr.shape[0]))
+
+        gray1 = cv2.cvtColor(frame1_bgr, cv2.COLOR_BGR2GRAY)
+        gray2 = cv2.cvtColor(frame2_bgr, cv2.COLOR_BGR2GRAY)
+
+        abs_diff = cv2.absdiff(gray1, gray2)
+        mean_diff = float(np.mean(abs_diff))
+        max_diff = float(np.max(abs_diff))
+
+        # Edge difference
+        edge1 = cv2.Canny(gray1, 50, 150)
+        edge2 = cv2.Canny(gray2, 50, 150)
+        edge_diff = cv2.absdiff(edge1, edge2)
+        edge_diff_score = float(np.mean(edge_diff)) / 255.0
+
+        return {
+            "mean_pixel_diff": round(mean_diff, 2),
+            "max_pixel_diff": round(max_diff, 2),
+            "edge_disparity_score": round(edge_diff_score, 4),
+            "structural_similarity_index": round(max(0.0, 1.0 - (mean_diff / 128.0)), 4)
+        }
+

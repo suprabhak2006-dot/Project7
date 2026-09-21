@@ -6,16 +6,17 @@ from backend.app.db.session import Base
 
 class CaseStatus(str, enum.Enum):
     OPEN = "OPEN"
-    IN_PROGRESS = "IN_PROGRESS"
-    UNDER_REVIEW = "UNDER_REVIEW"
-    CLOSED = "CLOSED"
+    UNDER_INVESTIGATION = "UNDER_INVESTIGATION"
+    ANALYSIS_IN_PROGRESS = "ANALYSIS_IN_PROGRESS"
+    REVIEW_REQUIRED = "REVIEW_REQUIRED"
+    COMPLETED = "COMPLETED"
     ARCHIVED = "ARCHIVED"
 
 class CasePriority(str, enum.Enum):
     LOW = "LOW"
     MEDIUM = "MEDIUM"
     HIGH = "HIGH"
-    CRITICAL = "CRITICAL"
+    URGENT = "URGENT"
 
 class Case(Base):
     __tablename__ = "cases"
@@ -34,3 +35,6 @@ class Case(Base):
     evidence = relationship("Evidence", back_populates="case", cascade="all, delete-orphan")
     audit_logs = relationship("AuditLog", back_populates="case", cascade="all, delete-orphan")
     reports = relationship("Report", back_populates="case", cascade="all, delete-orphan")
+    subjects = relationship("Subject", back_populates="case", cascade="all, delete-orphan")
+    annotations = relationship("Annotation", back_populates="case", cascade="all, delete-orphan")
+    events = relationship("CaseEvent", back_populates="case", cascade="all, delete-orphan")

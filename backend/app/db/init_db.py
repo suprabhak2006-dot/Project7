@@ -19,9 +19,27 @@ def get_file_sha256(path: str) -> str:
             h.update(chunk)
     return h.hexdigest()
 
+from sqlalchemy import text
+
 async def init_db() -> None:
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        # Migrate SQLite findings columns if needed
+        try:
+            cols_res = await conn.execute(text("PRAGMA table_info(findings)"))
+            existing_cols = {row[1] for row in cols_res.fetchall()}
+            if existing_cols:
+                if "review_status" not in existing_cols:
+                    await conn.execute(text("ALTER TABLE findings ADD COLUMN review_status VARCHAR(32) DEFAULT 'PENDING'"))
+                if "reviewer_id" not in existing_cols:
+                    await conn.execute(text("ALTER TABLE findings ADD COLUMN reviewer_id INTEGER"))
+                if "reviewer_notes" not in existing_cols:
+                    await conn.execute(text("ALTER TABLE findings ADD COLUMN reviewer_notes TEXT"))
+                if "reviewed_at" not in existing_cols:
+                    await conn.execute(text("ALTER TABLE findings ADD COLUMN reviewed_at DATETIME"))
+        except Exception as e:
+            print(f"[!] Migration notice: {e}")
+
 
     async with AsyncSessionLocal() as session:
         # Check if admin exists

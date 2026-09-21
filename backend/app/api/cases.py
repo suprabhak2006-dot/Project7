@@ -132,3 +132,13 @@ async def update_case(
     resp = CaseResponse.model_validate(case)
     resp.evidence_count = count
     return resp
+
+@router.get("/{id}/evidence")
+async def list_case_evidence(
+    id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    ev_res = await db.execute(select(Evidence).where(Evidence.case_id == id).order_by(Evidence.uploaded_at.desc()))
+    return ev_res.scalars().all()
+

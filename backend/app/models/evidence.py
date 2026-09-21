@@ -35,3 +35,5 @@ class Evidence(Base):
     case = relationship("Case", back_populates="evidence")
     uploader = relationship("User", back_populates="evidence_items")
     analyses = relationship("Analysis", back_populates="evidence", cascade="all, delete-orphan")
+    face_tracks = relationship("FaceTrack", back_populates="evidence", cascade="all, delete-orphan")
+    annotations = relationship("Annotation", back_populates="evidence", cascade="all, delete-orphan")

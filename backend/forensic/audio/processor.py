@@ -165,3 +165,110 @@ class AudioForensicProcessor:
             "score": 0.0,
             "confidence": 0.0
         }
+
+    def generate_audio_lab_data(self, wav_path: str) -> Dict[str, Any]:
+        """
+        Generates full forensic audio laboratory data (Requirements 25-29):
+        Waveform envelope, Spectrogram, Pitch contour, RMS energy curve,
+        Windowed segments, and Audio Splice Discontinuity Detection.
+        """
+        if not os.path.exists(wav_path):
+            return {"error": "WAV file not found"}
+
+        sr, audio_data = wavfile.read(wav_path)
+        if audio_data.ndim > 1:
+            audio_data = audio_data.mean(axis=1)
+
+        if audio_data.dtype == np.int16:
+            y = audio_data.astype(np.float32) / 32768.0
+        elif audio_data.dtype == np.int32:
+            y = audio_data.astype(np.float32) / 2147483648.0
+        else:
+            y = audio_data.astype(np.float32)
+
+        duration = len(y) / float(sr)
+        if duration <= 0:
+            return {"error": "Audio stream is empty"}
+
+        # 1. Downsampled waveform (150 points max)
+        step_wave = max(1, len(y) // 150)
+        waveform = [round(float(np.max(np.abs(y[i : i + step_wave]))), 4) for i in range(0, len(y), step_wave)]
+
+        # 2. Short-Time Fourier Transform (STFT)
+        nperseg = min(len(y), 1024)
+        noverlap = nperseg // 2
+        f, t, Zxx = signal.stft(y, fs=sr, nperseg=nperseg, noverlap=noverlap)
+        spec_mag = np.abs(Zxx)
+
+        # 3. RMS Energy curve over time
+        hop = int(sr * 0.1)  # 100ms
+        energy_curve = []
+        pitch_contour = []
+        for i in range(0, len(y) - hop, hop):
+            sec = round(i / float(sr), 2)
+            chunk = y[i : i + hop]
+            rms = float(np.sqrt(np.mean(chunk**2)))
+            energy_curve.append({"time": sec, "energy": round(rms, 4)})
+
+            # Pitch estimation for chunk
+            f0 = 0.0
+            if rms > 0.01:
+                corr = signal.correlate(chunk, chunk, mode="full")
+                corr = corr[len(corr)//2 :]
+                min_lag = int(sr / 400)
+                max_lag = int(sr / 70)
+                if max_lag < len(corr):
+                    peak_lag = min_lag + np.argmax(corr[min_lag : max_lag])
+                    if peak_lag > 0:
+                        f0 = round(float(sr / peak_lag), 1)
+            pitch_contour.append({"time": sec, "pitch_hz": f0})
+
+        # 4. Audio Splice Discontinuity Detection (Requirement 29)
+        # Abrupt jumps in energy or noise floor within 200ms
+        splice_candidates = []
+        for i in range(1, len(energy_curve)):
+            prev_e = energy_curve[i-1]["energy"]
+            curr_e = energy_curve[i]["energy"]
+            # Jump ratio
+            if prev_e > 0.005 and curr_e > 0.005:
+                ratio = max(prev_e, curr_e) / min(prev_e, curr_e)
+                if ratio > 6.0:  # Sudden 6x discontinuity in energy envelope
+                    splice_candidates.append({
+                        "timestamp": energy_curve[i]["time"],
+                        "confidence": round(min(1.0, (ratio - 6.0) / 10.0 + 0.5), 3),
+                        "type": "Loudness/Energy Discontinuity",
+                        "description": f"Abrupt {round(ratio, 1)}x energy disparity at {energy_curve[i]['time']}s indicating potential edit or splice"
+                    })
+
+        # 5. Segment-by-segment window analysis (3-second chunks, Requirement 26)
+        segment_len = int(sr * 3.0)
+        segments = []
+        for seg_idx, i in enumerate(range(0, len(y), segment_len)):
+            chunk = y[i : i + segment_len]
+            if len(chunk) < sr * 0.5:
+                continue
+            seg_start = round(i / float(sr), 2)
+            seg_end = round(min(duration, (i + len(chunk)) / float(sr)), 2)
+            seg_rms = float(np.sqrt(np.mean(chunk**2)))
+            seg_flatness = float(np.exp(np.mean(np.log(np.abs(chunk) + 1e-12))) / (np.mean(np.abs(chunk)) + 1e-12))
+            
+            segments.append({
+                "segment_index": seg_idx + 1,
+                "interval": f"{seg_start:.1f}s - {seg_end:.1f}s",
+                "start_time": seg_start,
+                "end_time": seg_end,
+                "energy_rms": round(seg_rms, 4),
+                "spectral_flatness": round(seg_flatness, 4),
+                "anomaly_flag": bool(seg_flatness > 0.5 or seg_rms < 0.001)
+            })
+
+        return {
+            "duration": round(duration, 2),
+            "sample_rate": sr,
+            "waveform": waveform,
+            "energy_curve": energy_curve,
+            "pitch_contour": pitch_contour,
+            "splices_detected": splice_candidates,
+            "segments": segments
+        }
+

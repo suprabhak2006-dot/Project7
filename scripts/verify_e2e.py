@@ -32,8 +32,10 @@ async def run_e2e():
         user = user_res.scalar_one()
         print(f"[*] Authenticated as: {user.name} ({user.role})")
 
+        import uuid
+        case_uid = uuid.uuid4().hex[:6].upper()
         case = Case(
-            case_number="CASE-2026-E2E01",
+            case_number=f"CASE-2026-E2E{case_uid}",
             title="End-to-End Synthetic Media Verification",
             description="Automated system integrity and forensic inference verification",
             status=CaseStatus.OPEN,
@@ -64,7 +66,7 @@ async def run_e2e():
 
         ev = Evidence(
             case_id=case.id,
-            evidence_number="EV-00001",
+            evidence_number=f"EV-{case_uid}",
             filename="test_face.jpg",
             mime_type="image/jpeg",
             media_type=MediaType.IMAGE,

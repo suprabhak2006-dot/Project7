@@ -12,17 +12,29 @@ import {
   Activity,
   History,
   Play,
-  Clock
+  Clock,
+  Layers,
+  GitCompare,
+  UserCheck,
+  Network
 } from "lucide-react";
 import { api } from "@/lib/api";
-import { Case, Evidence, Analysis, Finding, Report, AuditLog } from "@/types";
+import { Case, Evidence, Analysis, Finding, Report, AuditLog, InvestigationGraph, Subject, FaceTrack } from "@/types";
+
+import InvestigationGraphViewer from "./components/InvestigationGraph";
+import ForensicFilterLab from "./components/ForensicFilterLab";
+import VideoAudioLab from "./components/VideoAudioLab";
+import SubjectTrackManager from "./components/SubjectTrackManager";
+import EvidenceCompareModal from "./components/EvidenceCompareModal";
+import FindingReviewManager from "./components/FindingReviewManager";
+import ReportManifestExport from "./components/ReportManifestExport";
 
 export default function CaseWorkspacePage({ params }: { params: Promise<{ id: string }> }) {
   const resolvedParams = use(params);
   const caseId = parseInt(resolvedParams.id, 10);
 
   const [activeTab, setActiveTab] = useState<
-    "overview" | "evidence" | "analysis" | "timeline" | "findings" | "custody" | "reports" | "audit"
+    "overview" | "evidence" | "labs" | "subjects" | "analysis" | "timeline" | "findings" | "reports" | "audit"
   >("overview");
 
   const [caseData, setCaseData] = useState<Case | null>(null);
@@ -32,6 +44,9 @@ export default function CaseWorkspacePage({ params }: { params: Promise<{ id: st
   const [findings, setFindings] = useState<Finding[]>([]);
   const [reports, setReports] = useState<Report[]>([]);
   const [auditLogs, setAuditLogs] = useState<AuditLog[]>([]);
+  const [graphData, setGraphData] = useState<InvestigationGraph | null>(null);
+  const [subjects, setSubjects] = useState<Subject[]>([]);
+  const [faceTracks, setFaceTracks] = useState<FaceTrack[]>([]);
 
   const [loading, setLoading] = useState(true);
   const [analyzing, setAnalyzing] = useState(false);
@@ -43,6 +58,9 @@ export default function CaseWorkspacePage({ params }: { params: Promise<{ id: st
   const [uploadFile, setUploadFile] = useState<File | null>(null);
   const [uploading, setUploading] = useState(false);
 
+  // Compare modal state
+  const [showCompareModal, setShowCompareModal] = useState(false);
+
   // Integrity status
   const [integrityStatus, setIntegrityStatus] = useState<Record<number, string>>({});
   const [verifyingHash, setVerifyingHash] = useState<number | null>(null);
@@ -51,10 +69,29 @@ export default function CaseWorkspacePage({ params }: { params: Promise<{ id: st
     try {
       const c = await api.getCase(caseId);
       setCaseData(c);
+
       const logs = await api.getAuditLogs(caseId);
       setAuditLogs(logs);
+
+      // Load extended workspace data
+      const ws = await api.getCaseWorkspace(caseId);
+      if (ws) {
+        setSubjects(ws.subjects || []);
+        setFaceTracks(ws.face_tracks || []);
+      }
+
+      // Load graph
+      const g = await api.getCaseGraph(caseId);
+      setGraphData(g);
+
+      // Load evidence items
+      const evs = await api.listEvidence(caseId);
+      setEvidenceList(evs);
+      if (evs.length > 0 && !selectedEvidence) {
+        setSelectedEvidence(evs[0]);
+      }
     } catch (err) {
-      console.error(err);
+      console.error("Workspace load error:", err);
     } finally {
       setLoading(false);
     }
@@ -100,6 +137,7 @@ export default function CaseWorkspacePage({ params }: { params: Promise<{ id: st
 
   // Trigger Real Analysis
   const handleStartAnalysis = async (ev: Evidence) => {
+    setSelectedEvidence(ev);
     setAnalyzing(true);
     setAnalysisStage("QUEUED");
     setAnalysisMessage("Enqueuing forensic analysis job...");
@@ -119,39 +157,32 @@ export default function CaseWorkspacePage({ params }: { params: Promise<{ id: st
             if (payload.data?.message) {
               setAnalysisMessage(payload.data.message);
             }
-            if (payload.stage === "COMPLETED") {
-              eventSource.close();
-              setAnalyzing(false);
-              api.getAnalysis(initiated.id).then((full) => {
-                setAnalysis(full);
-                api.getFindings(initiated.id).then(setFindings);
-              });
-              loadCaseData();
-            } else if (payload.stage === "FAILED") {
-              eventSource.close();
-              setAnalyzing(false);
-              alert("Analysis pipeline reported failure: " + (payload.data?.error || "Unknown"));
-            }
           }
-        } catch {}
+          if (payload.stage === "COMPLETED") {
+            eventSource.close();
+            setAnalyzing(false);
+            api.getAnalysis(initiated.id).then((completedAnalysis) => {
+              setAnalysis(completedAnalysis);
+            });
+            api.getFindings(initiated.id).then(setFindings);
+            loadCaseData();
+          } else if (payload.stage === "FAILED") {
+            eventSource.close();
+            setAnalyzing(false);
+            alert("Analysis failed: " + (payload.data?.error || "Unknown error"));
+          }
+        } catch (err) {
+          console.error("SSE parse error:", err);
+        }
+      };
+
+      eventSource.onerror = () => {
+        eventSource.close();
+        setAnalyzing(false);
       };
     } catch (err) {
       setAnalyzing(false);
-      alert(err instanceof Error ? err.message : "Failed to start analysis");
-    }
-  };
-
-  // Generate Report
-  const handleGenerateReport = async () => {
-    if (!analysis) return;
-    try {
-      const rep = await api.generateReport(analysis.id);
-      setReports((prev) => [rep, ...prev]);
-      setActiveTab("reports");
-      await loadCaseData();
-      alert(`Professional Forensic Report generated! Number: ${rep.report_number}`);
-    } catch (err) {
-      alert(err instanceof Error ? err.message : "Failed to generate report");
+      alert(err instanceof Error ? err.message : "Analysis trigger failed");
     }
   };
 
@@ -160,7 +191,7 @@ export default function CaseWorkspacePage({ params }: { params: Promise<{ id: st
       <div className="flex items-center justify-center min-h-[60vh]">
         <div className="flex items-center space-x-3 text-sm font-mono text-[#86729C]">
           <div className="w-4 h-4 border-2 border-[#EC4899] border-t-transparent rounded-full animate-spin" />
-          <span>LOADING CASE WORKSPACE...</span>
+          <span>LOADING ADVANCED FORENSIC WORKSPACE...</span>
         </div>
       </div>
     );
@@ -177,11 +208,13 @@ export default function CaseWorkspacePage({ params }: { params: Promise<{ id: st
               <span className="px-2.5 py-0.5 rounded-full text-xs font-semibold bg-[#FAF5FF] text-[#9333EA] border border-[#E9D5FF]">
                 {caseData.status}
               </span>
-              <span className={`px-2.5 py-0.5 rounded-full text-xs font-semibold ${
-                caseData.priority === "HIGH" || caseData.priority === "CRITICAL"
-                  ? "bg-[#FFF1F2] text-[#E11D48] border border-[#FECDD3]"
-                  : "bg-[#F3E8FF] text-[#7C3AED]"
-              }`}>
+              <span
+                className={`px-2.5 py-0.5 rounded-full text-xs font-semibold ${
+                  caseData.priority === "HIGH" || caseData.priority === "URGENT"
+                    ? "bg-[#FFF1F2] text-[#E11D48] border border-[#FECDD3]"
+                    : "bg-[#F3E8FF] text-[#7C3AED]"
+                }`}
+              >
                 {caseData.priority} PRIORITY
               </span>
             </div>
@@ -190,8 +223,16 @@ export default function CaseWorkspacePage({ params }: { params: Promise<{ id: st
 
           <div className="flex items-center space-x-3">
             <button
+              onClick={() => setShowCompareModal(true)}
+              className="flex items-center space-x-2 bg-white border border-[#E9D5FF] hover:border-[#F472B6] text-[#2D1B46] font-semibold px-3.5 py-2 rounded-xl text-xs shadow-2xs transition-all"
+            >
+              <GitCompare className="w-4 h-4 text-purple-600" />
+              <span>COMPARE EVIDENCE</span>
+            </button>
+
+            <button
               onClick={() => setShowUpload(true)}
-              className="flex items-center space-x-2 bg-gradient-to-r from-[#F472B6] to-[#C084FC] hover:opacity-95 text-white font-semibold px-4 py-2.5 rounded-xl text-xs font-mono shadow-xs transition-all"
+              className="flex items-center space-x-2 bg-gradient-to-r from-[#F472B6] to-[#C084FC] hover:opacity-95 text-white font-semibold px-4 py-2 rounded-xl text-xs font-mono shadow-xs transition-all"
             >
               <UploadCloud className="w-4 h-4" />
               <span>INGEST EVIDENCE</span>
@@ -199,17 +240,18 @@ export default function CaseWorkspacePage({ params }: { params: Promise<{ id: st
           </div>
         </div>
 
-        {/* 8 Navigation Tabs */}
+        {/* 9 Navigation Tabs */}
         <div className="flex items-center space-x-1 border-t border-[#F3E8FF] pt-3 overflow-x-auto text-xs font-mono">
           {[
-            { id: "overview", label: "OVERVIEW", icon: FolderLock },
+            { id: "overview", label: "OVERVIEW & GRAPH", icon: Network },
             { id: "evidence", label: "EVIDENCE", icon: ShieldCheck },
-            { id: "analysis", label: "FORENSIC ANALYSIS", icon: Activity },
+            { id: "labs", label: "FORENSIC LABS", icon: Layers },
+            { id: "subjects", label: "SUBJECTS & TRACKS", icon: UserCheck },
+            { id: "analysis", label: "LIVE PIPELINE", icon: Activity },
             { id: "timeline", label: "TIMELINE", icon: Play },
-            { id: "findings", label: "FINDINGS", icon: AlertTriangle },
-            { id: "custody", label: "CHAIN OF CUSTODY", icon: History },
-            { id: "reports", label: "REPORTS", icon: FileText },
-            { id: "audit", label: "AUDIT LOG", icon: Clock },
+            { id: "findings", label: "FINDINGS & REVIEW", icon: AlertTriangle },
+            { id: "reports", label: "REPORTS & EXPORT", icon: FileText },
+            { id: "audit", label: "AUDIT LOG", icon: Clock }
           ].map((tab) => {
             const Icon = tab.icon;
             const isActive = activeTab === tab.id;
@@ -217,7 +259,7 @@ export default function CaseWorkspacePage({ params }: { params: Promise<{ id: st
               <button
                 key={tab.id}
                 onClick={() => setActiveTab(tab.id as any)}
-                className={`flex items-center space-x-2 px-3.5 py-2 rounded-xl transition-all ${
+                className={`flex items-center space-x-2 px-3.5 py-2 rounded-xl transition-all whitespace-nowrap ${
                   isActive
                     ? "bg-gradient-to-r from-[#FDF2F8] to-[#FAF5FF] text-[#EC4899] border border-[#FBCFE8] font-bold shadow-xs"
                     : "text-[#86729C] hover:text-[#2D1B46] hover:bg-[#FAF5FF]"
@@ -231,11 +273,13 @@ export default function CaseWorkspacePage({ params }: { params: Promise<{ id: st
         </div>
       </div>
 
-      {/* ----------------- TAB: OVERVIEW ----------------- */}
+      {/* ----------------- TAB: OVERVIEW & GRAPH ----------------- */}
       {activeTab === "overview" && (
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-          <div className="md:col-span-2 space-y-6">
-            <div className="bg-white/80 backdrop-blur-md border border-[#F3E8FF] rounded-2xl p-5 space-y-3 shadow-xs">
+        <div className="space-y-6">
+          <InvestigationGraphViewer graphData={graphData} />
+
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+            <div className="md:col-span-2 bg-white/80 backdrop-blur-md border border-[#F3E8FF] rounded-2xl p-5 space-y-3 shadow-xs">
               <h3 className="text-sm font-bold text-[#2D1B46] font-mono uppercase">Case Overview & Details</h3>
               <p className="text-xs text-[#86729C] leading-relaxed">
                 {caseData.description || "No formal case description provided at time of initialization."}
@@ -252,24 +296,26 @@ export default function CaseWorkspacePage({ params }: { params: Promise<{ id: st
               </div>
             </div>
 
-            <div className="bg-white/80 backdrop-blur-md border border-[#F3E8FF] rounded-2xl p-5 space-y-3 shadow-xs">
-              <h3 className="text-sm font-bold text-[#2D1B46] font-mono uppercase">Forensic Procedures & Defensibility</h3>
-              <p className="text-xs text-[#86729C] leading-relaxed">
-                Evidence uploaded to this case is stored immutably in isolated directory storage. Cryptographic SHA-256 hashes are recorded immediately upon transmission. All subsequent derivatives (face crops, spectrograms, heatmaps) maintain traceable pointers back to the original evidence hash.
-              </p>
-            </div>
-          </div>
-
-          <div className="space-y-6">
             <div className="bg-white/80 backdrop-blur-md border border-[#F3E8FF] rounded-2xl p-5 space-y-4 font-mono text-xs shadow-xs">
-              <h3 className="font-bold text-[#2D1B46] uppercase">Investigation Quick Actions</h3>
-              <button
-                onClick={() => setShowUpload(true)}
-                className="w-full text-left p-3.5 rounded-xl bg-[#FAF5FF] border border-[#E9D5FF] hover:border-[#F472B6] transition-all"
-              >
-                <div className="font-bold text-[#2D1B46]">+ Upload Media File</div>
-                <div className="text-[11px] text-[#86729C]">Images (JPG/PNG), Videos (MP4), Audio (WAV/MP3)</div>
-              </button>
+              <h3 className="font-bold text-[#2D1B46] uppercase">Forensic Workspace Telemetry</h3>
+              <div className="space-y-2 text-xs">
+                <div className="flex justify-between py-1 border-b border-pink-50">
+                  <span className="text-[#86729C]">Ingested Evidence:</span>
+                  <span className="font-bold text-[#2D1B46]">{evidenceList.length} items</span>
+                </div>
+                <div className="flex justify-between py-1 border-b border-pink-50">
+                  <span className="text-[#86729C]">Tracked Subjects:</span>
+                  <span className="font-bold text-[#9333EA]">{subjects.length} registered</span>
+                </div>
+                <div className="flex justify-between py-1 border-b border-pink-50">
+                  <span className="text-[#86729C]">Face Tracks Cataloged:</span>
+                  <span className="font-bold text-[#EC4899]">{faceTracks.length} tracks</span>
+                </div>
+                <div className="flex justify-between py-1 border-b border-pink-50">
+                  <span className="text-[#86729C]">Audit Events:</span>
+                  <span className="font-bold text-[#059669]">{auditLogs.length} verified logs</span>
+                </div>
+              </div>
             </div>
           </div>
         </div>
@@ -281,12 +327,20 @@ export default function CaseWorkspacePage({ params }: { params: Promise<{ id: st
           <div className="bg-white/80 backdrop-blur-md border border-[#F3E8FF] rounded-2xl p-5 space-y-4 shadow-xs">
             <div className="flex items-center justify-between">
               <h3 className="text-sm font-bold text-[#2D1B46] font-mono uppercase">Ingested Evidence Items</h3>
-              <button
-                onClick={() => setShowUpload(true)}
-                className="px-3.5 py-1.5 rounded-xl bg-gradient-to-r from-[#F472B6] to-[#C084FC] text-white font-mono text-xs font-bold shadow-xs"
-              >
-                + ADD EVIDENCE
-              </button>
+              <div className="flex gap-2">
+                <button
+                  onClick={() => setShowCompareModal(true)}
+                  className="px-3.5 py-1.5 rounded-xl bg-white border border-[#E9D5FF] text-[#2D1B46] font-mono text-xs font-semibold shadow-2xs hover:border-[#F472B6]"
+                >
+                  Compare Evidence
+                </button>
+                <button
+                  onClick={() => setShowUpload(true)}
+                  className="px-3.5 py-1.5 rounded-xl bg-gradient-to-r from-[#F472B6] to-[#C084FC] text-white font-mono text-xs font-bold shadow-xs"
+                >
+                  + ADD EVIDENCE
+                </button>
+              </div>
             </div>
 
             {evidenceList.length > 0 ? (
@@ -294,10 +348,16 @@ export default function CaseWorkspacePage({ params }: { params: Promise<{ id: st
                 {evidenceList.map((ev) => {
                   const status = integrityStatus[ev.id];
                   const isVerifying = verifyingHash === ev.id;
+                  const isSelected = selectedEvidence?.id === ev.id;
                   return (
                     <div
                       key={ev.id}
-                      className="p-4 bg-[#FAF5FF]/80 border border-[#F3E8FF] rounded-xl flex flex-col md:flex-row md:items-center justify-between gap-4 font-mono text-xs shadow-xs"
+                      onClick={() => setSelectedEvidence(ev)}
+                      className={`p-4 border rounded-xl flex flex-col md:flex-row md:items-center justify-between gap-4 font-mono text-xs shadow-xs cursor-pointer transition-all ${
+                        isSelected
+                          ? "bg-purple-50/70 border-purple-300 ring-2 ring-purple-100"
+                          : "bg-[#FAF5FF]/80 border-[#F3E8FF] hover:border-pink-200"
+                      }`}
                     >
                       <div className="space-y-1">
                         <div className="flex items-center space-x-2">
@@ -305,18 +365,30 @@ export default function CaseWorkspacePage({ params }: { params: Promise<{ id: st
                           <span className="px-2.5 py-0.5 rounded-full bg-white text-[#9333EA] border border-[#E9D5FF] text-[10px] font-bold">
                             {ev.media_type}
                           </span>
-                          <span className="text-[#86729C]">({(ev.file_size / (1024*1024)).toFixed(2)} MB)</span>
+                          <span className="text-[#86729C]">
+                            ({(ev.file_size / (1024 * 1024)).toFixed(2)} MB)
+                          </span>
+                          {isSelected && (
+                            <span className="text-[10px] px-2 py-0.5 rounded bg-purple-200 text-purple-900 font-bold">
+                              ACTIVE TARGET
+                            </span>
+                          )}
                         </div>
                         <div className="text-[#2D1B46] font-medium">{ev.filename}</div>
                         <div className="text-[11px] text-[#86729C] flex items-center space-x-1">
                           <span>SHA-256:</span>
-                          <code className="text-[#2D1B46] bg-white px-1.5 py-0.5 rounded border border-[#E9D5FF] text-[10px]">{ev.sha256}</code>
+                          <code className="text-[#2D1B46] bg-white px-1.5 py-0.5 rounded border border-[#E9D5FF] text-[10px]">
+                            {ev.sha256}
+                          </code>
                         </div>
                       </div>
 
                       <div className="flex items-center space-x-3 self-start md:self-center">
                         <button
-                          onClick={() => handleVerifyIntegrity(ev.id)}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleVerifyIntegrity(ev.id);
+                          }}
                           disabled={isVerifying}
                           className={`px-3.5 py-1.5 rounded-xl border text-[11px] font-semibold transition-all shadow-xs ${
                             status === "INTEGRITY_VERIFIED"
@@ -328,7 +400,10 @@ export default function CaseWorkspacePage({ params }: { params: Promise<{ id: st
                         </button>
 
                         <button
-                          onClick={() => handleStartAnalysis(ev)}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleStartAnalysis(ev);
+                          }}
                           className="px-4 py-1.5 rounded-xl bg-gradient-to-r from-[#F472B6] to-[#C084FC] hover:opacity-95 text-white font-semibold text-[11px] shadow-xs transition-all"
                         >
                           RUN PIPELINE &rarr;
@@ -354,129 +429,139 @@ export default function CaseWorkspacePage({ params }: { params: Promise<{ id: st
         </div>
       )}
 
-      {/* ----------------- TAB: ANALYSIS ----------------- */}
+      {/* ----------------- TAB: FORENSIC LABS ----------------- */}
+      {activeTab === "labs" && (
+        <div className="space-y-6">
+          <div className="bg-white/80 backdrop-blur-md rounded-2xl border border-pink-100 p-4 flex items-center justify-between">
+            <span className="text-xs text-gray-600">
+              Target Evidence: <strong className="text-purple-900">{selectedEvidence?.filename || "None selected"}</strong> ({selectedEvidence?.media_type})
+            </span>
+            <div className="flex gap-2">
+              {evidenceList.map((e) => (
+                <button
+                  key={e.id}
+                  onClick={() => setSelectedEvidence(e)}
+                  className={`px-3 py-1 rounded-lg text-xs font-semibold border ${
+                    selectedEvidence?.id === e.id
+                      ? "bg-purple-600 text-white border-purple-600"
+                      : "bg-white text-gray-700 border-gray-200"
+                  }`}
+                >
+                  {e.evidence_number}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {selectedEvidence?.media_type === "IMAGE" && <ForensicFilterLab evidence={selectedEvidence} />}
+          {(selectedEvidence?.media_type === "VIDEO" || selectedEvidence?.media_type === "AUDIO") && (
+            <VideoAudioLab evidence={selectedEvidence} />
+          )}
+        </div>
+      )}
+
+      {/* ----------------- TAB: SUBJECTS & TRACKS ----------------- */}
+      {activeTab === "subjects" && (
+        <SubjectTrackManager
+          caseId={caseId}
+          subjects={subjects}
+          faceTracks={faceTracks}
+          onRefresh={loadCaseData}
+        />
+      )}
+
+      {/* ----------------- TAB: LIVE ANALYSIS PIPELINE ----------------- */}
       {activeTab === "analysis" && (
         <div className="space-y-6">
           {analyzing && (
-            <div className="bg-white/80 backdrop-blur-md border border-[#F472B6] rounded-2xl p-6 space-y-4 shadow-xs">
-              <div className="flex items-center space-x-3">
+            <div className="bg-white/80 backdrop-blur-md border border-[#FBCFE8] rounded-2xl p-6 space-y-4 shadow-sm">
+              <div className="flex items-center space-x-3 text-sm font-bold text-[#2D1B46] font-mono">
                 <div className="w-5 h-5 border-2 border-[#EC4899] border-t-transparent rounded-full animate-spin" />
-                <span className="font-bold text-[#2D1B46] text-sm font-mono uppercase">
-                  Active Forensic Pipeline Stage: [{analysisStage}]
+                <span>MULTIMODAL INVESTIGATION PIPELINE ACTIVE</span>
+              </div>
+
+              <div className="space-y-2 font-mono text-xs">
+                <div className="flex justify-between text-[#86729C]">
+                  <span>CURRENT STAGE: <strong className="text-[#9333EA]">{analysisStage}</strong></span>
+                  <span>STATUS: RUNNING</span>
+                </div>
+                <div className="w-full bg-[#FAF5FF] h-2 rounded-full overflow-hidden border border-[#E9D5FF]">
+                  <div
+                    className="h-full bg-gradient-to-r from-[#F472B6] to-[#C084FC] transition-all duration-500 rounded-full animate-pulse"
+                    style={{
+                      width:
+                        analysisStage === "QUEUED"
+                          ? "10%"
+                          : analysisStage === "INGESTION_INTEGRITY"
+                          ? "25%"
+                          : analysisStage === "METADATA_EXTRACTION"
+                          ? "40%"
+                          : analysisStage === "FACE_DETECTION"
+                          ? "60%"
+                          : analysisStage === "VIT_INFERENCE"
+                          ? "75%"
+                          : analysisStage === "TEMPORAL_ANALYSIS"
+                          ? "85%"
+                          : analysisStage === "MULTIMODAL_FUSION"
+                          ? "95%"
+                          : "100%"
+                    }}
+                  />
+                </div>
+                <p className="text-[11px] text-[#86729C] italic">{analysisMessage}</p>
+              </div>
+            </div>
+          )}
+
+          {analysis && (
+            <div className="bg-white/80 backdrop-blur-md border border-[#F3E8FF] rounded-2xl p-6 space-y-6 shadow-xs font-mono text-xs">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between border-b border-[#F3E8FF] pb-4 gap-4">
+                <div>
+                  <h3 className="text-base font-bold text-[#2D1B46]">
+                    Analysis Outcome #{analysis.id} &bull; Pipeline v{analysis.pipeline_version}
+                  </h3>
+                  <p className="text-[#86729C] text-[11px] mt-0.5">Execution Device: {analysis.inference_device}</p>
+                </div>
+                <span
+                  className={`px-3 py-1 rounded-full text-xs font-bold ${
+                    analysis.assessment === "HIGH_MANIPULATION_LIKELIHOOD"
+                      ? "bg-[#FFF1F2] text-[#E11D48] border border-[#FECDD3]"
+                      : analysis.assessment === "LOW_MANIPULATION_LIKELIHOOD"
+                      ? "bg-[#ECFDF5] text-[#059669] border-[#A7F3D0]"
+                      : "bg-[#F3E8FF] text-[#7C3AED] border border-[#E9D5FF]"
+                  }`}
+                >
+                  {analysis.assessment || "PENDING"}
                 </span>
               </div>
-              <p className="text-xs text-[#86729C] font-mono">{analysisMessage}</p>
-              
-              <div className="grid grid-cols-2 sm:grid-cols-5 gap-2 pt-2 text-[10px] font-mono">
-                {["VALIDATING", "METADATA", "FACE_DETECTION", "AI_INFERENCE", "FORENSIC_ANALYSIS", "TEMPORAL_ANALYSIS", "AUDIO_ANALYSIS", "AV_ANALYSIS", "FUSION", "FINDINGS"].map((s, idx) => (
-                  <div
-                    key={s}
-                    className={`p-2.5 rounded-xl border transition-all ${
-                      analysisStage === s
-                        ? "bg-gradient-to-r from-[#FDF2F8] to-[#FAF5FF] border-[#F472B6] text-[#EC4899] font-bold shadow-xs"
-                        : "bg-[#FAF5FF] border-[#F3E8FF] text-[#86729C]"
-                    }`}
-                  >
-                    {idx + 1}. {s.replace("_", " ")}
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
 
-          {analysis && !analyzing && (
-            <div className="space-y-6">
-              {/* Conflict Alert Banner */}
-              {analysis.evidence_conflict && (
-                <div className="bg-[#FFF1F2] border-2 border-[#FECDD3] rounded-2xl p-5 space-y-2 shadow-xs">
-                  <div className="flex items-center space-x-2 text-sm font-bold text-[#E11D48] font-mono">
-                    <AlertTriangle className="w-5 h-5" />
-                    <span>EVIDENCE CONFLICT DETECTED</span>
-                  </div>
-                  <p className="text-xs text-[#2D1B46] font-mono leading-relaxed">
-                    {analysis.conflict_details}
-                  </p>
-                </div>
-              )}
-
-              {/* Assessment Gauge Card */}
-              <div className="bg-white/80 backdrop-blur-md border border-[#F3E8FF] rounded-2xl p-6 grid grid-cols-1 md:grid-cols-3 gap-6 font-mono shadow-xs">
-                <div className="space-y-1">
-                  <div className="text-xs text-[#86729C] font-medium">MANIPULATION LIKELIHOOD</div>
-                  <div className="text-4xl font-extrabold text-[#EC4899]">
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                <div className="p-4 bg-[#FAF5FF] border border-[#E9D5FF] rounded-xl space-y-1">
+                  <div className="text-[#86729C] text-[11px]">CALIBRATED FUSION SCORE</div>
+                  <div className="text-2xl font-bold text-[#2D1B46]">
                     {analysis.final_score !== null ? `${(analysis.final_score * 100).toFixed(1)}%` : "N/A"}
                   </div>
-                  <div className="text-[11px] text-[#86729C]">Probabilistic model aggregation</div>
+                  <div className="text-[10px] text-[#86729C]">Likelihood of synthetic manipulation</div>
                 </div>
 
-                <div className="space-y-1">
-                  <div className="text-xs text-[#86729C] font-medium">EVIDENCE CONFIDENCE</div>
-                  <div className="text-4xl font-extrabold text-[#A855F7]">
+                <div className="p-4 bg-[#FAF5FF] border border-[#E9D5FF] rounded-xl space-y-1">
+                  <div className="text-[#86729C] text-[11px]">CALIBRATED CONFIDENCE</div>
+                  <div className="text-2xl font-bold text-[#9333EA]">
                     {analysis.confidence !== null ? `${(analysis.confidence * 100).toFixed(1)}%` : "N/A"}
                   </div>
-                  <div className="text-[11px] text-[#86729C]">Modality certainty level</div>
+                  <div className="text-[10px] text-[#86729C]">Based on biometric clarity and signal variance</div>
                 </div>
 
-                <div className="space-y-2 flex flex-col justify-center">
-                  <div className="text-xs text-[#86729C] font-medium">OFFICIAL ASSESSMENT</div>
-                  <span className={`px-3 py-2 rounded-xl text-xs font-bold text-center border shadow-xs ${
-                    analysis.assessment === "HIGH_MANIPULATION_LIKELIHOOD"
-                      ? "bg-[#FFF1F2] text-[#E11D48] border-[#FECDD3]"
-                      : analysis.assessment === "EVIDENCE_CONFLICT"
-                      ? "bg-[#FEF3C7] text-[#D97706] border-[#FDE68A]"
-                      : "bg-[#ECFDF5] text-[#059669] border-[#A7F3D0]"
-                  }`}>
-                    {analysis.assessment?.replace(/_/g, " ")}
-                  </span>
+                <div className="p-4 bg-[#FAF5FF] border border-[#E9D5FF] rounded-xl space-y-1">
+                  <div className="text-[#86729C] text-[11px]">EVIDENCE CONFLICT STATUS</div>
+                  <div className={`text-sm font-bold ${analysis.evidence_conflict ? "text-[#E11D48]" : "text-[#059669]"}`}>
+                    {analysis.evidence_conflict ? "CONFLICT OBSERVED" : "SIGNALS CONGRUENT"}
+                  </div>
+                  <div className="text-[10px] text-[#86729C]">
+                    {analysis.conflict_details || "No contradictory signals between visual & acoustic layers."}
+                  </div>
                 </div>
               </div>
-
-              {/* Evaluated Modalities Table */}
-              <div className="bg-white/80 backdrop-blur-md border border-[#F3E8FF] rounded-2xl p-5 space-y-4 shadow-xs">
-                <div className="flex items-center justify-between">
-                  <h3 className="text-sm font-bold text-[#2D1B46] font-mono uppercase">Multi-Signal Forensic Observations</h3>
-                  <button
-                    onClick={handleGenerateReport}
-                    className="px-4 py-2 bg-gradient-to-r from-[#F472B6] to-[#C084FC] text-white font-mono text-xs font-bold rounded-xl shadow-xs hover:opacity-95"
-                  >
-                    GENERATE PDF REPORT &rarr;
-                  </button>
-                </div>
-
-                <div className="overflow-x-auto">
-                  <table className="w-full text-left text-xs font-mono">
-                    <thead className="border-b border-[#F3E8FF] text-[#86729C]">
-                      <tr>
-                        <th className="pb-3">MODULE</th>
-                        <th className="pb-3">CATEGORY</th>
-                        <th className="pb-3">MEASURED SCORE</th>
-                        <th className="pb-3">CONFIDENCE</th>
-                        <th className="pb-3">FINDING DETAILS</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-[#F3E8FF]">
-                      {analysis.fusion_details?.modules_evaluated &&
-                        Object.entries(analysis.fusion_details.modules_evaluated).map(([mName, mData]: any) => (
-                          <tr key={mName} className="hover:bg-[#FAF5FF]">
-                            <td className="py-3 font-semibold text-[#2D1B46]">{mName.replace(/_/g, " ").toUpperCase()}</td>
-                            <td className="py-3 text-[#7C3AED] font-medium">{mData.category}</td>
-                            <td className="py-3 font-bold text-[#EC4899]">{(mData.score * 100).toFixed(1)}%</td>
-                            <td className="py-3 text-[#86729C]">{(mData.confidence * 100).toFixed(0)}%</td>
-                            <td className="py-3 text-[#2D1B46]">{mData.description}</td>
-                          </tr>
-                        ))}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
-            </div>
-          )}
-
-          {!analysis && !analyzing && (
-            <div className="bg-white/80 backdrop-blur-md border border-[#F3E8FF] rounded-2xl p-12 text-center text-xs font-mono text-[#86729C] space-y-3 shadow-xs">
-              <Activity className="w-8 h-8 mx-auto text-[#EC4899]" />
-              <div className="text-[#2D1B46] font-bold">No analysis has been initiated on this evidence yet.</div>
-              <div className="text-[11px]">Go to the Evidence tab and click &quot;RUN PIPELINE&quot; to execute real AI inference.</div>
             </div>
           )}
         </div>
@@ -484,29 +569,25 @@ export default function CaseWorkspacePage({ params }: { params: Promise<{ id: st
 
       {/* ----------------- TAB: TIMELINE ----------------- */}
       {activeTab === "timeline" && (
-        <div className="bg-white/80 backdrop-blur-md border border-[#F3E8FF] rounded-2xl p-5 space-y-4 shadow-xs">
-          <h3 className="text-sm font-bold text-[#2D1B46] font-mono uppercase">Video Temporal Manipulation Timeline</h3>
+        <div className="bg-white/80 backdrop-blur-md border border-[#F3E8FF] rounded-2xl p-6 space-y-6 shadow-xs font-mono text-xs">
+          <h3 className="text-sm font-bold text-[#2D1B46] uppercase">Temporal Frame Anomaly Timeline</h3>
           {analysis?.timeline_data && analysis.timeline_data.length > 0 ? (
-            <div className="space-y-4 font-mono text-xs">
+            <div className="space-y-4">
               <div className="p-4 bg-[#FAF5FF] border border-[#E9D5FF] rounded-xl">
-                <div className="flex items-center justify-between text-[#86729C] mb-2 font-medium">
-                  <span>FRAME-BY-FRAME MANIPULATION SCORE TRAJECTORY</span>
-                  <span>TOTAL FRAMES: {analysis.timeline_data.length}</span>
-                </div>
-                <div className="h-28 flex items-end gap-1.5 overflow-x-auto py-2">
+                <div className="h-32 flex items-end gap-1.5 overflow-x-auto pb-2">
                   {analysis.timeline_data.map((pt, i) => {
-                    const heightPct = Math.max(8, pt.score * 100);
-                    const isSpike = pt.score >= 0.70;
+                    const heightPct = Math.max(8, Math.min(100, pt.score * 100));
+                    const isSpike = pt.is_spike || pt.score >= 0.75;
                     return (
                       <div
                         key={i}
                         title={`t=${pt.timestamp}s, score=${(pt.score * 100).toFixed(1)}%`}
-                        className="flex flex-col items-center flex-shrink-0 group cursor-pointer"
+                        className="flex flex-col items-center flex-shrink-0 cursor-pointer"
                       >
                         <div
                           style={{ height: `${heightPct}%` }}
                           className={`w-3.5 rounded-t-md transition-all ${
-                            isSpike ? "bg-[#E11D48]" : "bg-gradient-to-t from-[#F472B6] to-[#C084FC] hover:opacity-90"
+                            isSpike ? "bg-[#E11D48]" : "bg-gradient-to-t from-[#F472B6] to-[#C084FC]"
                           }`}
                         />
                       </div>
@@ -516,128 +597,32 @@ export default function CaseWorkspacePage({ params }: { params: Promise<{ id: st
               </div>
             </div>
           ) : (
-            <div className="py-12 text-center text-xs text-[#86729C] font-mono">
-              Temporal timeline is available for video evidence containing extracted frame sequences.
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* ----------------- TAB: FINDINGS ----------------- */}
-      {activeTab === "findings" && (
-        <div className="bg-white/80 backdrop-blur-md border border-[#F3E8FF] rounded-2xl p-5 space-y-4 font-mono text-xs shadow-xs">
-          <div className="flex items-center justify-between">
-            <h3 className="text-sm font-bold text-[#2D1B46] uppercase">Traceable Forensic Findings</h3>
-            <span className="text-[#86729C]">{findings.length} findings recorded</span>
-          </div>
-
-          {findings.length > 0 ? (
-            <div className="divide-y divide-[#F3E8FF]">
-              {findings.map((f) => (
-                <div key={f.id} className="py-4 space-y-1.5">
-                  <div className="flex items-center space-x-3">
-                    <span className="font-bold text-[#2D1B46]">{f.finding_code}</span>
-                    <span className={`px-2.5 py-0.5 rounded-full text-[10px] font-bold ${
-                      f.severity === "CRITICAL"
-                        ? "bg-[#FFF1F2] text-[#E11D48] border border-[#FECDD3]"
-                        : f.severity === "HIGH"
-                        ? "bg-[#FDF2F8] text-[#DB2777] border border-[#FBCFE8]"
-                        : "bg-[#F3E8FF] text-[#7C3AED]"
-                    }`}>
-                      {f.severity}
-                    </span>
-                    <span className="text-[#9333EA] font-semibold">{f.category}</span>
-                    <span className="text-[#86729C]">Score: {(f.score * 100).toFixed(1)}%</span>
-                  </div>
-                  <p className="text-[#2D1B46] font-medium">{f.description}</p>
-                  <div className="text-[10px] text-[#86729C]">
-                    Detector: {f.model_name} (v{f.model_version})
-                  </div>
-                </div>
-              ))}
-            </div>
-          ) : (
-            <div className="py-12 text-center text-xs text-[#86729C]">
-              No findings recorded. Run an analysis on evidence to generate findings.
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* ----------------- TAB: CHAIN OF CUSTODY ----------------- */}
-      {activeTab === "custody" && (
-        <div className="bg-white/80 backdrop-blur-md border border-[#F3E8FF] rounded-2xl p-5 space-y-4 font-mono text-xs shadow-xs">
-          <h3 className="text-sm font-bold text-[#2D1B46] uppercase">Cryptographic Chain of Custody</h3>
-          <div className="divide-y divide-[#F3E8FF]">
-            {auditLogs.map((log) => (
-              <div key={log.id} className="py-3 flex items-start justify-between">
-                <div className="space-y-1">
-                  <div className="font-bold text-[#EC4899]">{log.action}</div>
-                  <div className="text-[#86729C] text-[11px]">
-                    {JSON.stringify(log.details || {})}
-                  </div>
-                </div>
-                <div className="text-[#86729C] text-[11px] text-right font-medium">
-                  {new Date(log.timestamp).toUTCString()}
-                </div>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {/* ----------------- TAB: REPORTS ----------------- */}
-      {activeTab === "reports" && (
-        <div className="bg-white/80 backdrop-blur-md border border-[#F3E8FF] rounded-2xl p-5 space-y-4 font-mono text-xs shadow-xs">
-          <div className="flex items-center justify-between">
-            <h3 className="text-sm font-bold text-[#2D1B46] uppercase">Official Forensic Reports</h3>
-            {analysis && (
-              <button
-                onClick={handleGenerateReport}
-                className="px-4 py-2 bg-gradient-to-r from-[#F472B6] to-[#C084FC] text-white font-bold rounded-xl shadow-xs hover:opacity-95"
-              >
-                + GENERATE NEW PDF REPORT
-              </button>
-            )}
-          </div>
-
-          {reports.length > 0 ? (
-            <div className="space-y-3">
-              {reports.map((rep) => (
-                <div
-                  key={rep.id}
-                  className="p-4 bg-[#FAF5FF] border border-[#E9D5FF] rounded-xl flex items-center justify-between shadow-xs"
-                >
-                  <div className="space-y-1">
-                    <div className="font-bold text-[#2D1B46]">{rep.report_number}</div>
-                    <div className="text-[11px] text-[#86729C]">
-                      SHA-256: <code className="text-[#2D1B46] bg-white px-1.5 py-0.5 rounded border border-[#E9D5FF]">{rep.report_sha256}</code>
-                    </div>
-                  </div>
-                  <div className="flex items-center space-x-3">
-                    <a
-                      href={api.getReportDownloadUrl(rep.id)}
-                      target="_blank"
-                      className="px-3.5 py-1.5 rounded-xl bg-white border border-[#E9D5FF] hover:border-[#F472B6] text-[#2D1B46] font-semibold transition-all shadow-xs"
-                    >
-                      Download PDF &darr;
-                    </a>
-                  </div>
-                </div>
-              ))}
-            </div>
-          ) : (
             <div className="py-12 text-center text-[#86729C]">
-              No reports generated yet for this case. Run an analysis and click &quot;Generate PDF Report&quot;.
+              Temporal frame sequence will appear here once video analysis executes.
             </div>
           )}
         </div>
+      )}
+
+      {/* ----------------- TAB: FINDINGS & REVIEW ----------------- */}
+      {activeTab === "findings" && (
+        <FindingReviewManager findings={findings} onRefresh={loadCaseData} />
+      )}
+
+      {/* ----------------- TAB: REPORTS & EXPORT ----------------- */}
+      {activeTab === "reports" && (
+        <ReportManifestExport
+          caseData={caseData}
+          reports={reports}
+          analysisId={analysis?.id}
+          onRefresh={loadCaseData}
+        />
       )}
 
       {/* ----------------- TAB: AUDIT LOG ----------------- */}
       {activeTab === "audit" && (
         <div className="bg-white/80 backdrop-blur-md border border-[#F3E8FF] rounded-2xl p-5 space-y-4 font-mono text-xs shadow-xs">
-          <h3 className="text-sm font-bold text-[#2D1B46] uppercase">Immutable System Audit Log</h3>
+          <h3 className="text-sm font-bold text-[#2D1B46] uppercase">Immutable Cryptographic Audit Trail</h3>
           <div className="divide-y divide-[#F3E8FF]">
             {auditLogs.map((log) => (
               <div key={log.id} className="py-2.5 flex items-center justify-between">
@@ -652,13 +637,24 @@ export default function CaseWorkspacePage({ params }: { params: Promise<{ id: st
         </div>
       )}
 
-      {/* Upload Evidence Modal */}
+      {/* Modal: Compare Evidence */}
+      {showCompareModal && (
+        <EvidenceCompareModal
+          evidenceList={evidenceList}
+          isOpen={showCompareModal}
+          onClose={() => setShowCompareModal(false)}
+        />
+      )}
+
+      {/* Modal: Upload Evidence */}
       {showUpload && (
         <div className="fixed inset-0 bg-[#2D1B46]/30 backdrop-blur-sm z-50 flex items-center justify-center p-4">
           <div className="bg-white border border-[#F3E8FF] rounded-2xl max-w-md w-full p-6 space-y-5 shadow-2xl">
             <div className="flex items-center justify-between border-b border-[#F3E8FF] pb-3">
               <h3 className="font-bold text-[#2D1B46] text-base font-mono">Ingest New Media Evidence</h3>
-              <button onClick={() => setShowUpload(false)} className="text-[#86729C] hover:text-[#2D1B46]">&times;</button>
+              <button onClick={() => setShowUpload(false)} className="text-[#86729C] hover:text-[#2D1B46]">
+                &times;
+              </button>
             </div>
 
             <form onSubmit={handleUpload} className="space-y-4 text-xs font-mono">
@@ -676,7 +672,7 @@ export default function CaseWorkspacePage({ params }: { params: Promise<{ id: st
               {uploadFile && (
                 <div className="p-3 bg-[#FAF5FF] border border-[#E9D5FF] rounded-xl space-y-1 text-[11px]">
                   <div>File: <span className="text-[#2D1B46] font-bold">{uploadFile.name}</span></div>
-                  <div>Size: <span className="text-[#2D1B46] font-bold">{(uploadFile.size / (1024*1024)).toFixed(2)} MB</span></div>
+                  <div>Size: <span className="text-[#2D1B46] font-bold">{(uploadFile.size / (1024 * 1024)).toFixed(2)} MB</span></div>
                   <div className="text-[#059669] font-medium">SHA-256 will be calculated immediately upon ingestion.</div>
                 </div>
               )}

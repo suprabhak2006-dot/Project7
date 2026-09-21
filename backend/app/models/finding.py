@@ -15,9 +15,15 @@ class FindingCategory(str, enum.Enum):
 class FindingSeverity(str, enum.Enum):
     INFO = "INFO"
     LOW = "LOW"
-    MEDIUM = "MEDIUM"
+    MODERATE = "MODERATE"
     HIGH = "HIGH"
     CRITICAL = "CRITICAL"
+
+class ReviewStatus(str, enum.Enum):
+    PENDING = "PENDING"
+    CONFIRMED = "CONFIRMED"
+    DISPUTED = "DISPUTED"
+    NEEDS_REVIEW = "NEEDS_REVIEW"
 
 class Finding(Base):
     __tablename__ = "findings"
@@ -26,10 +32,11 @@ class Finding(Base):
     analysis_id = Column(Integer, ForeignKey("analyses.id"), nullable=False)
     finding_code = Column(String(64), index=True, nullable=False)
     category = Column(Enum(FindingCategory), nullable=False)
-    severity = Column(Enum(FindingSeverity), default=FindingSeverity.MEDIUM, nullable=False)
+    severity = Column(Enum(FindingSeverity), default=FindingSeverity.MODERATE, nullable=False)
     
-    confidence = Column(Float, nullable=False)
-    score = Column(Float, nullable=False)
+    # Strictly separated confidence vs score
+    confidence = Column(Float, nullable=False)  # Detection confidence (e.g. 0.0 - 1.0)
+    score = Column(Float, nullable=False)       # Forensic anomaly score (e.g. 0.0 - 1.0)
     description = Column(Text, nullable=False)
     
     timestamp = Column(Float, nullable=True)
@@ -40,6 +47,13 @@ class Finding(Base):
     model_version = Column(String(32), nullable=False)
     raw_output = Column(JSON, nullable=True)
     
+    # Investigator Review Workflow (AI provenance is immutable)
+    review_status = Column(Enum(ReviewStatus), default=ReviewStatus.PENDING, nullable=False)
+    reviewer_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    reviewer_notes = Column(Text, nullable=True)
+    reviewed_at = Column(DateTime, nullable=True)
+    
     created_at = Column(DateTime, default=datetime.datetime.utcnow, nullable=False)
 
     analysis = relationship("Analysis", back_populates="findings")
+    reviewer = relationship("User")

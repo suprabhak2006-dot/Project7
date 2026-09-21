@@ -55,6 +55,10 @@ os.makedirs(settings.STORAGE_PATH, exist_ok=True)
 app.mount("/static/storage", StaticFiles(directory=settings.STORAGE_PATH), name="storage")
 
 # Include API Routers
+from backend.app.api.workspace import router as workspace_router
+from backend.app.api.lab import router as lab_router
+from backend.app.api.system import router as system_router
+
 app.include_router(auth_router, prefix=settings.API_V1_STR)
 app.include_router(cases_router, prefix=settings.API_V1_STR)
 app.include_router(evidence_router, prefix=settings.API_V1_STR)
@@ -65,6 +69,9 @@ app.include_router(models_router, prefix=settings.API_V1_STR)
 app.include_router(reports_router, prefix=settings.API_V1_STR)
 app.include_router(audit_router, prefix=settings.API_V1_STR)
 app.include_router(dashboard_router, prefix=settings.API_V1_STR)
+app.include_router(workspace_router, prefix=settings.API_V1_STR)
+app.include_router(lab_router, prefix=settings.API_V1_STR)
+app.include_router(system_router, prefix=settings.API_V1_STR)
 
 @app.get("/health")
 async def health_check():
